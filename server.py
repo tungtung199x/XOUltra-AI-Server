@@ -1,4 +1,5 @@
 import asyncio
+import http
 import json
 import os
 import time
@@ -932,6 +933,22 @@ async def handler(ws):
             await remove_player(room_id, ws)
 
 
+async def health_check(path, request_headers):
+    """HTTP health endpoint cho UptimeRobot / load balancer.
+    Trả 200 OK để ping giữ server không ngủ trên Render free tier.
+    """
+    if path in ("/", "/health", "/healthz", "/ping"):
+        body = b"OK\n"
+        headers = [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Content-Length", str(len(body))),
+            ("Cache-Control", "no-store"),
+        ]
+        return http.HTTPStatus.OK, headers, body
+    # Các path khác → để websockets tiếp tục handshake bình thường.
+    return None
+
+
 async def main():
     port = int(os.environ.get("PORT", 3000))
     print(f"XOUltra-AI Server port {port} | TURN_SECS={TURN_SECS}")
@@ -939,6 +956,7 @@ async def main():
         handler,
         "0.0.0.0",
         port,
+        process_request=health_check,
         ping_interval=15,
         ping_timeout=8,
         max_size=MAX_MESSAGE_BYTES,
