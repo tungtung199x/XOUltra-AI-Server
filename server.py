@@ -934,10 +934,10 @@ async def handler(ws):
 
 
 async def health_check(path, request_headers):
-    """HTTP health endpoint cho UptimeRobot / load balancer.
-    Trả 200 OK để ping giữ server không ngủ trên Render free tier.
-    """
-    if path in ("/", "/health", "/healthz", "/ping"):
+    """HTTP health cho UptimeRobot. Chỉ /health — không chặn path "/" (WebSocket)."""
+    # Chỉ /health|/healthz|/ping — KHÔNG bắt "/" vì WebSocket handshake mặc định ở "/".
+    pure = path.split("?", 1)[0]
+    if pure in ("/health", "/healthz", "/ping"):
         body = b"OK\n"
         headers = [
             ("Content-Type", "text/plain; charset=utf-8"),
@@ -945,7 +945,7 @@ async def health_check(path, request_headers):
             ("Cache-Control", "no-store"),
         ]
         return http.HTTPStatus.OK, headers, body
-    # Các path khác → để websockets tiếp tục handshake bình thường.
+    # Path "/" và path khác → để websockets làm handshake bình thường.
     return None
 
 
