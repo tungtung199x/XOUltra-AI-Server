@@ -117,7 +117,7 @@ def cancel_resign_task(state):
 
 
 async def expire_resign_offer(room_id, expected_symbol, expected_deadline):
-    """Auto-reject resign offer after RESIGN_OFFER_SECS if not answered."""
+    """Auto-reject draw offer after RESIGN_OFFER_SECS if not answered."""
     try:
         delay = max(0.0, expected_deadline - time.time())
         await asyncio.sleep(delay)
@@ -646,7 +646,7 @@ async def handler(ws):
                         }) for p in room)
 
                     elif t == "resign":
-                        # Gửi yêu cầu đầu hàng (tối đa MAX_RESIGN_OFFERS lần / ván).
+                        # Gửi yêu cầu cầu hòa (tối đa MAX_RESIGN_OFFERS lần / ván).
                         # Ván vẫn chơi được; yêu cầu tự hết sau RESIGN_OFFER_SECS giây.
                         has_moves = bool(state.get("board")) and any(
                             any(cell != "" for cell in row) for row in state["board"]
@@ -690,7 +690,7 @@ async def handler(ws):
                         outbound.extend((p["ws"], offer_payload) for p in room)
 
                     elif t == "resign_accept":
-                        # Chấp nhận → trao thắng + vào ván mới ngay (không cần bấm VÁN MỚI).
+                        # Chấp nhận cầu hòa → hòa cờ + vào ván mới ngay (không cần bấm VÁN MỚI).
                         pending = state.get("pending_resign")
                         if state.get("game_over") or not pending:
                             continue
@@ -698,8 +698,7 @@ async def handler(ws):
                             continue
                         now = time.time()
                         cancel_resign_task(state)
-                        winner = sender.get("symbol")
-                        loser = pending
+                        loser = pending  # người gửi cầu hòa
                         resigned_by_name = (
                             state.get("pending_resign_name")
                             or next((p.get("name", "") for p in room if p.get("symbol") == loser), "")
@@ -707,12 +706,14 @@ async def handler(ws):
                         state["pending_resign"] = None
                         state["pending_resign_name"] = None
                         state["resign_deadline"] = None
+                        state["game_over"] = True
+                        state["winner"] = None
 
                         times = current_match_times(state, now)
                         resign_payload = {
                             "type": "game_result",
-                            "result": "resign",
-                            "winner": winner,
+                            "result": "draw",
+                            "winner": None,
                             "resigned_by": resigned_by_name,
                             "resigned_symbol": loser,
                             "line": [],
@@ -756,7 +757,7 @@ async def handler(ws):
                         }) for p in room)
 
                     elif t == "resign_reject":
-                        # Từ chối yêu cầu đầu hàng → tiếp tục ván, đồng hồ vẫn chạy.
+                        # Từ chối yêu cầu cầu hòa → tiếp tục ván, đồng hồ vẫn chạy.
                         pending = state.get("pending_resign")
                         if state.get("game_over") or not pending:
                             continue
