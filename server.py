@@ -645,6 +645,42 @@ async def handler(ws):
                             "type": "timeout", "loser": loser, "times": times, "server_ts": now
                         }) for p in room)
 
+                    elif t == "surrender":
+                        # Đầu hàng thật — người gửi thua, đối thủ thắng. Không giới hạn số lần bấm
+                        # (client đã có xác nhận 10s). Chỉ hợp lệ khi ván đang chơi và đã có nước.
+                        has_moves = bool(state.get("board")) and any(
+                            any(cell != "" for cell in row) for row in state["board"]
+                        )
+                        if state.get("game_over") or not has_moves:
+                            continue
+                        loser = sender.get("symbol")
+                        if loser not in ("X", "O"):
+                            continue
+                        now = time.time()
+                        cancel_resign_task(state)
+                        cancel_turn_task(state)
+                        consume_active_turn(state, now)
+                        state["pending_resign"] = None
+                        state["pending_resign_name"] = None
+                        state["resign_deadline"] = None
+                        state["turn"] = None
+                        state["turn_deadline"] = None
+                        state["turn_started_at"] = None
+                        state["game_over"] = True
+                        state["winner"] = opponent(loser)
+                        times = current_match_times(state, now)
+                        result = {
+                            "type": "game_result",
+                            "result": "win",
+                            "winner": opponent(loser),
+                            "line": [],
+                            "surrendered_by": sender.get("name", ""),
+                            "surrendered_symbol": loser,
+                            "times": times,
+                            "server_ts": now,
+                        }
+                        outbound.extend((p["ws"], result) for p in room)
+
                     elif t == "resign":
                         # Gửi yêu cầu cầu hòa (tối đa MAX_RESIGN_OFFERS lần / ván).
                         # Ván vẫn chơi được; yêu cầu tự hết sau RESIGN_OFFER_SECS giây.
