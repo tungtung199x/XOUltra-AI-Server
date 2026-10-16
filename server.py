@@ -726,7 +726,8 @@ async def handler(ws):
                         outbound.extend((p["ws"], offer_payload) for p in room)
 
                     elif t == "resign_accept":
-                        # Chấp nhận cầu hòa → hòa cờ + vào ván mới ngay (không cần bấm VÁN MỚI).
+                        # Chấp nhận cầu hòa → hòa cờ. Hiện VÁN MỚI (giống đầu hàng),
+                        # cả hai bấm VÁN MỚI mới vào ván kế (không auto rematch).
                         pending = state.get("pending_resign")
                         if state.get("game_over") or not pending:
                             continue
@@ -734,6 +735,8 @@ async def handler(ws):
                             continue
                         now = time.time()
                         cancel_resign_task(state)
+                        cancel_turn_task(state)
+                        consume_active_turn(state, now)
                         loser = pending  # người gửi cầu hòa
                         resigned_by_name = (
                             state.get("pending_resign_name")
@@ -742,8 +745,13 @@ async def handler(ws):
                         state["pending_resign"] = None
                         state["pending_resign_name"] = None
                         state["resign_deadline"] = None
+                        state["turn"] = None
+                        state["turn_deadline"] = None
+                        state["turn_started_at"] = None
                         state["game_over"] = True
                         state["winner"] = None
+                        for p in room:
+                            p["rematch_ready"] = False
 
                         times = current_match_times(state, now)
                         resign_payload = {
@@ -755,43 +763,10 @@ async def handler(ws):
                             "line": [],
                             "times": times,
                             "server_ts": now,
-                            "auto_rematch": True,
+                            "draw_agreed": True,
+                            "auto_rematch": False,
                         }
                         outbound.extend((p["ws"], resign_payload) for p in room)
-
-                        # Vào ván mới ngay lập tức
-                        if state.get("auto_rotate", True):
-                            for p in room:
-                                p["symbol"] = opponent(p["symbol"])
-                        cancel_turn_task(state)
-                        limit = int(state.get("time_limit", 0))
-                        state["match_remaining"] = {"X": float(limit), "O": float(limit)}
-                        state["board"] = make_board(board_dimension(state.get("board_size", "20x20")))
-                        state["game_over"] = False
-                        state["winner"] = None
-                        state["last_move"] = None
-                        state["turn"] = None
-                        state["turn_deadline"] = None
-                        state["turn_started_at"] = None
-                        state["resign_counts"] = {"X": 0, "O": 0}
-                        for p in room:
-                            p["rematch_ready"] = False
-                            outbound.append((p["ws"], {
-                                "type": "rematch",
-                                "symbol": p["symbol"],
-                                "auto_rotate": bool(state.get("auto_rotate", True)),
-                            }))
-                        state["turn"] = "X"
-                        state["turn_secs"] = float(TURN_SECS)
-                        state["turn_deadline"] = None
-                        state["turn_started_at"] = None
-                        state["task"] = None
-                        times2 = current_match_times(state, now)
-                        outbound.extend((p["ws"], {
-                            "type": "turn_start", "symbol": "X", "turn_secs": TURN_SECS,
-                            "deadline": None, "times": times2, "server_ts": now
-                        }) for p in room)
-
                     elif t == "resign_reject":
                         # Từ chối yêu cầu cầu hòa → tiếp tục ván, đồng hồ vẫn chạy.
                         pending = state.get("pending_resign")
