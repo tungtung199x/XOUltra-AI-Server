@@ -26,7 +26,6 @@ def clean(text, max_len=24, default=""):
 
 
 def normalize_rule(rule):
-    """Chuẩn hóa luật về mã trung lập — không phụ thuộc ngôn ngữ client."""
     r = str(rule or "").strip().lower()
     if r in ("block_both_ends", "block"):
         return "block_both_ends"
@@ -182,7 +181,6 @@ def check_win(board, r, c, piece, rule):
         if len(cells) >= 5:
             if is_standard:
                 return cells
-            # Luật chặn 2 đầu: bị chặn cả hai đầu thì không thắng
             if blocked_pos and blocked_neg:
                 continue
             return cells
@@ -301,7 +299,6 @@ async def remove_player(room_id, ws):
             rooms.pop(room_id, None)
             return
         state = room_state(room)
-        # Còn 1 người: dừng đồng hồ, xóa bàn, chờ đối thủ vào lại (không đá người còn lại)
         if len(room) == 1:
             cancel_turn_task(state)
             state["turn"] = None
@@ -311,7 +308,6 @@ async def remove_player(room_id, ws):
             state["game_over"] = True
             state["winner"] = None
             state["last_move"] = None
-            # Reset bàn để khi đối thủ vào lại sẽ start sạch
             try:
                 size = board_dimension(state.get("board_size", "20x20"))
                 state["board"] = make_board(size)
@@ -440,7 +436,6 @@ async def handler(ws):
                             "times": {"X": final_time, "O": final_time},
                         }))
 
-                    # Lượt đầu: X đi trước nhưng CHƯA bật đồng hồ — chỉ đếm sau nước đi đầu.
                     cancel_turn_task(state)
                     state["turn"] = "X"
                     state["turn_secs"] = float(TURN_SECS)
@@ -494,12 +489,9 @@ async def handler(ws):
                 t = payload.get("type")
 
                 if t == "leave":
-                    # Client chủ động báo thoát → xử lý ngay, không chờ TCP/ping timeout
                     do_leave = True
                 elif len(room) < 2:
                     if t == "symbol_update":
-                        # Trước khi trận bắt đầu, người chơi vẫn được đổi X/O/Tự động.
-                        # Phòng chờ chưa có bàn cờ nên chưa có nước đi để khóa lựa chọn.
                         new_sym = payload.get("symbol")
                         if new_sym in ("X", "O"):
                             sender["symbol"] = new_sym
@@ -646,8 +638,6 @@ async def handler(ws):
                         }) for p in room)
 
                     elif t == "surrender":
-                        # Đầu hàng thật — người gửi thua, đối thủ thắng. Không giới hạn số lần bấm
-                        # (client đã có xác nhận 10s). Chỉ hợp lệ khi ván đang chơi và đã có nước.
                         has_moves = bool(state.get("board")) and any(
                             any(cell != "" for cell in row) for row in state["board"]
                         )
@@ -682,8 +672,6 @@ async def handler(ws):
                         outbound.extend((p["ws"], result) for p in room)
 
                     elif t == "resign":
-                        # Gửi yêu cầu cầu hòa (tối đa MAX_RESIGN_OFFERS lần / ván).
-                        # Ván vẫn chơi được; yêu cầu tự hết sau RESIGN_OFFER_SECS giây.
                         has_moves = bool(state.get("board")) and any(
                             any(cell != "" for cell in row) for row in state["board"]
                         )
@@ -726,8 +714,6 @@ async def handler(ws):
                         outbound.extend((p["ws"], offer_payload) for p in room)
 
                     elif t == "resign_accept":
-                        # Chấp nhận cầu hòa → hòa cờ. Hiện VÁN MỚI (giống đầu hàng),
-                        # cả hai bấm VÁN MỚI mới vào ván kế (không auto rematch).
                         pending = state.get("pending_resign")
                         if state.get("game_over") or not pending:
                             continue
@@ -737,7 +723,7 @@ async def handler(ws):
                         cancel_resign_task(state)
                         cancel_turn_task(state)
                         consume_active_turn(state, now)
-                        loser = pending  # người gửi cầu hòa
+                        loser = pending
                         resigned_by_name = (
                             state.get("pending_resign_name")
                             or next((p.get("name", "") for p in room if p.get("symbol") == loser), "")
@@ -768,7 +754,6 @@ async def handler(ws):
                         }
                         outbound.extend((p["ws"], resign_payload) for p in room)
                     elif t == "resign_reject":
-                        # Từ chối yêu cầu cầu hòa → tiếp tục ván, đồng hồ vẫn chạy.
                         pending = state.get("pending_resign")
                         if state.get("game_over") or not pending:
                             continue
@@ -790,7 +775,6 @@ async def handler(ws):
 
                     elif t == "rematch":
                         sender["rematch_ready"] = True
-                        # Báo ngay cho cả phòng biết một người đã READY.
                         outbound.extend((p["ws"], {
                             "type": "rematch_waiting",
                             "ready_symbol": sender.get("symbol")
@@ -821,7 +805,6 @@ async def handler(ws):
                                     "symbol": p["symbol"],
                                     "auto_rotate": bool(state.get("auto_rotate", True)),
                                 }))
-                            # Ván mới: X đi trước nhưng chưa bật đồng hồ
                             state["turn"] = "X"
                             state["turn_secs"] = float(TURN_SECS)
                             state["turn_deadline"] = None
@@ -835,8 +818,6 @@ async def handler(ws):
                             }) for p in room)
 
                     elif t == "symbol_update":
-                        # Sau nước đầu tiên, server khóa X/O/Tự động để client
-                        # không thể bypass trạng thái disabled bằng packet thủ công.
                         has_moves = bool(state.get("board")) and any(
                             any(cell != "" for cell in row) for row in state["board"]
                         )
@@ -890,7 +871,6 @@ async def handler(ws):
                                     changed_fields.append("time_limit")
                                 state["time_limit"] = new_limit
                                 if not has_moves:
-                                    # Chưa có nước → chỉ reset số phút, không bật đếm
                                     state["match_remaining"] = {
                                         "X": float(new_limit), "O": float(new_limit)
                                     }
@@ -946,8 +926,6 @@ async def handler(ws):
 
 
 async def health_check(path, request_headers):
-    """HTTP health cho UptimeRobot. Chỉ /health — không chặn path "/" (WebSocket)."""
-    # Chỉ /health|/healthz|/ping — KHÔNG bắt "/" vì WebSocket handshake mặc định ở "/".
     pure = path.split("?", 1)[0]
     if pure in ("/health", "/healthz", "/ping"):
         body = b"OK\n"
@@ -957,7 +935,6 @@ async def health_check(path, request_headers):
             ("Cache-Control", "no-store"),
         ]
         return http.HTTPStatus.OK, headers, body
-    # Path "/" và path khác → để websockets làm handshake bình thường.
     return None
 
 
