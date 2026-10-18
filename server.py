@@ -1,11 +1,20 @@
 import asyncio
 import http
 import json
+import logging
 import os
 import time
 from contextlib import suppress
+from collections import defaultdict
 
 import websockets
+
+log = logging.getLogger("xoultra.server")
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
 
 rooms = {}
 rooms_lock = asyncio.Lock()
@@ -16,6 +25,11 @@ MAX_RESIGN_OFFERS = 2
 MAX_TIME_LIMIT_SECONDS = 7 * 24 * 60 * 60
 VALID_BOARDS = {"15x15": 15, "20x20": 20}
 MAX_MESSAGE_BYTES = 64 * 1024
+# Rate limits (per connection)
+CHAT_MIN_INTERVAL = 0.4          # seconds between chat messages
+MOVE_MIN_INTERVAL = 0.05         # soft floor against spam clicks
+IDLE_ROOM_SECS = 30 * 60         # drop empty/stale rooms after 30 min
+ROOM_CLEANUP_INTERVAL = 120      # how often the sweeper runs
 
 
 def clean(text, max_len=24, default=""):
@@ -284,6 +298,23 @@ def make_settings(state, player):
     }
 
 
+def _touch_room(room):
+    """Update last-activity timestamp used by the idle sweeper."""
+    state = room_state(room)
+    if state is not None:
+        state["last_active"] = time.time()
+
+
+def _rate_ok(player, key, min_interval):
+    """Simple per-player rate limit. Returns True if the action is allowed."""
+    now = time.time()
+    last = player.get(key, 0.0)
+    if now - last < min_interval:
+        return False
+    player[key] = now
+    return True
+
+
 async def remove_player(room_id, ws):
     outbound = []
     task = None
@@ -299,8 +330,10 @@ async def remove_player(room_id, ws):
             rooms.pop(room_id, None)
             return
         state = room_state(room)
+        _touch_room(room)
         if len(room) == 1:
             cancel_turn_task(state)
+            cancel_resign_task(state)
             state["turn"] = None
             state["turn_deadline"] = None
             state["turn_started_at"] = None
@@ -308,6 +341,9 @@ async def remove_player(room_id, ws):
             state["game_over"] = True
             state["winner"] = None
             state["last_move"] = None
+            state["pending_resign"] = None
+            state["pending_resign_name"] = None
+            state["resign_deadline"] = None
             try:
                 size = board_dimension(state.get("board_size", "20x20"))
                 state["board"] = make_board(size)
@@ -390,6 +426,7 @@ async def handler(ws):
                         "rule": rule,
                         "time_limit": time_limit,
                         "auto_rotate": True,
+                        "last_active": time.time(),
                     })
                     outbound.append((ws, {"type": "waiting", "msg_key": "online_waiting", "msg": "Đã vào phòng. Đang chờ đối thủ..."}))
                 else:
@@ -418,6 +455,7 @@ async def handler(ws):
                         "board": make_board(board_dimension(final_board)),
                         "game_over": False,
                         "winner": None,
+                        "last_active": time.time(),
                     })
                     for p in room:
                         p["rematch_ready"] = False
@@ -526,6 +564,8 @@ async def handler(ws):
                             (ws, {"type": "update_settings", **make_settings(sender, sender)}),
                         ])
                     elif t == "chat":
+                        if not _rate_ok(sender, "_last_chat", CHAT_MIN_INTERVAL):
+                            continue
                         text = clean(payload.get("text"), 500)
                         if text:
                             outbound.append((ws, {"type": "chat", "name": sender["name"], "text": text}))
@@ -534,6 +574,8 @@ async def handler(ws):
                     others = [p for p in room if p["ws"] is not ws]
 
                     if t == "move":
+                        if not _rate_ok(sender, "_last_move", MOVE_MIN_INTERVAL):
+                            continue
                         r, c = payload.get("r"), payload.get("c")
                         n = board_dimension(state.get("board_size", "20x20"))
                         reason = None
@@ -550,6 +592,7 @@ async def handler(ws):
                             outbound.append((ws, {"type": "move_rejected", "reason": reason}))
                         else:
                             now = time.time()
+                            state["last_active"] = now
                             # A move arriving after the server deadline is a timeout, not a valid move.
                             deadline = state.get("turn_deadline")
                             if deadline and now >= deadline:
@@ -900,8 +943,11 @@ async def handler(ws):
                             }))
 
                     elif t == "chat":
+                        if not _rate_ok(sender, "_last_chat", CHAT_MIN_INTERVAL):
+                            continue
                         text = clean(payload.get("text"), 500)
                         if text:
+                            _touch_room(room)
                             outbound.extend((p["ws"], {"type": "chat", "name": sender["name"], "text": text}) for p in room)
 
                     else:
@@ -919,10 +965,37 @@ async def handler(ws):
         pass
     except Exception:
         # A single malformed client must never bring down the server.
-        pass
+        log.exception("handler error room=%s", room_id)
     finally:
         if room_id and player and not player.get("_left"):
             await remove_player(room_id, ws)
+
+
+async def cleanup_idle_rooms():
+    """Periodically drop rooms that have been empty or inactive too long."""
+    while True:
+        await asyncio.sleep(ROOM_CLEANUP_INTERVAL)
+        now = time.time()
+        removed = []
+        async with rooms_lock:
+            stale = []
+            for rid, room in list(rooms.items()):
+                # Drop rooms with all closed sockets
+                room[:] = [p for p in room if not getattr(p["ws"], "closed", False)]
+                if not room:
+                    stale.append(rid)
+                    continue
+                state = room_state(room)
+                last = (state or {}).get("last_active", 0)
+                if last and (now - last) > IDLE_ROOM_SECS and len(room) < 2:
+                    cancel_turn_task(state)
+                    cancel_resign_task(state)
+                    stale.append(rid)
+            for rid in stale:
+                rooms.pop(rid, None)
+                removed.append(rid)
+        if removed:
+            log.info("Cleaned %d idle room(s): %s", len(removed), removed[:10])
 
 
 async def health_check(path, request_headers):
@@ -940,7 +1013,8 @@ async def health_check(path, request_headers):
 
 async def main():
     port = int(os.environ.get("PORT", 3000))
-    print(f"XOUltra-AI Server port {port} | TURN_SECS={TURN_SECS}")
+    log.info("XOUltra-AI Server port %s | TURN_SECS=%s", port, TURN_SECS)
+    asyncio.create_task(cleanup_idle_rooms())
     async with websockets.serve(
         handler,
         "0.0.0.0",
